@@ -80,7 +80,7 @@ object BigQueryAvroUtils {
     } else {
       for (field <- schema.getFields.asScala) yield {
         getBigQueryType(field) match {
-          case BigQueryType.ARRAY =>
+          case (BigQueryType.ARRAY, _) =>
             val childSchema = field.schema.getElementType
             if (childSchema.getType == AvroType.RECORD) {
               val child = getTableFieldSchema(field.schema.getElementType)
@@ -92,19 +92,19 @@ object BigQueryAvroUtils {
             } else {
               new BigQueryFieldSchema()
                 .setName(field.name)
-                .setType(getBigQueryType(childSchema.getFields.get(0)).value)
+                .setType(getBigQueryType(childSchema.getFields.get(0))._1.value)
                 .setMode("REPEATED")
             }
-          case BigQueryType.RECORD =>
+          case (BigQueryType.RECORD, _) =>
             new BigQueryFieldSchema()
               .setName(field.name)
               .setType("STRUCT")
               .setFields(getTableFieldSchema(field.schema).asJava)
-          case elmType =>
+          case (elmType, mode) =>
             new BigQueryFieldSchema()
               .setName(field.name)
               .setType(elmType.value)
-              .setMode("REQUIRED")
+              .setMode(mode)
         }
       }
     }
@@ -134,10 +134,24 @@ object BigQueryAvroUtils {
     }
   }
 
-  def getBigQueryType(avroField: AvroField): BigQueryType = {
+  type BigQueryMode = String
+  def getBigQueryType(avroField: AvroField): (BigQueryType, BigQueryMode) = {
     val avroType = avroField.schema.getType
     val logicalTypeMaybe =
       Option(avroField.schema.getLogicalType).map(_.getName)
+    if (avroType == AvroType.UNION)
+      avroField.schema.getTypes.asScala match {
+        case Seq(typeNull, typeAny) if typeNull.getType == AvroType.NULL =>
+          (getBigQueryType(typeAny.getType, logicalTypeMaybe), "NULLABLE")
+        case Seq(typeAny, typeNull) if typeNull.getType == AvroType.NULL =>
+          (getBigQueryType(typeAny.getType, logicalTypeMaybe), "NULLABLE")
+      } else {
+      (getBigQueryType(avroType, logicalTypeMaybe), "REQUIRED")
+    }
+  }
+
+  def getBigQueryType(avroType: AvroType,
+                      logicalTypeMaybe: Option[String]): BigQueryType = {
     avroType match {
       case AvroType.STRING =>
         BigQueryType.STRING
@@ -336,7 +350,8 @@ object BigQueryAvroUtils {
             convertRequiredField(elementType,
                                  elementLogicalType,
                                  fieldSchema,
-                                 element)).asJava
+                                 element))
+        .asJava
     }
 
   }
@@ -354,13 +369,13 @@ object BigQueryAvroUtils {
     if (value == null) {
       null
     } else {
-      unionTypes match {
-        case Seq(typeNull, typeAny: AvroSchema) if typeNull == AvroType.NULL =>
+      unionTypes.asScala match {
+        case Seq(typeNull, typeAny) if typeNull.getType == AvroType.NULL =>
           convertRequiredField(typeAny.getType,
                                typeAny.getLogicalType,
                                fieldSchema,
                                value)
-        case Seq(typeAny: AvroSchema, typeNull) if typeNull == AvroType.NULL =>
+        case Seq(typeAny, typeNull) if typeNull.getType == AvroType.NULL =>
           convertRequiredField(typeAny.getType,
                                typeAny.getLogicalType,
                                fieldSchema,
